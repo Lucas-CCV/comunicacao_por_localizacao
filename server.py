@@ -1,9 +1,17 @@
 from __future__     import annotations
 
-from typing         import (List, Optional)
-from geopy.distance import great_circle
-from enum           import Enum
+from typing           import (List, Optional)
 
+from Pyro5.client import Proxy
+from Pyro5.core import locate_ns
+from Pyro5.nameserver import start_ns_loop
+from Pyro5.server import expose, Daemon
+from geopy.distance   import great_circle
+from enum             import Enum
+from interfaces       import *
+
+import threading
+import time
 
 
 class Coordinate:
@@ -33,10 +41,6 @@ class Coordinate:
         return int(distance)
 
 
-    def __str__(self):
-        return f'({self.lat}, {self.lon})'
-
-
     def update_coordinate(self, latitude: float, longitude: float) -> Returns:
         if type(latitude) != float:
             return self.Returns.LATITUDE_NOT_FLOAT
@@ -54,6 +58,10 @@ class Coordinate:
         self.lon = longitude
 
         return self.Returns.NO_ERROR
+
+
+    def __str__(self):
+        return f'({self.lat}, {self.lon})'
 
 
 
@@ -78,21 +86,34 @@ class UserInformation:
 
 
 
-class Server:
+class Server(ServerInterface):
+    server_id = "|@servidor@|"
 
     class Returns(Enum):
         NO_ERROR = 0
         WRONG_USER_NAME = 1
-
+        USER_ALREADY_EXISTS = 2
 
     def __init__(self):
         self.user_list: List[UserInformation] = []
 
+        thread_servidor = threading.Thread(target=start_ns_loop, daemon=True, kwargs={"host":"localhost", "port":9090, "enableBroadcast":False})
+        thread_servidor.start()
 
-    def add_user(self, user: UserInformation):
-        self.user_list.append(user)
+        thread_servidors = threading.Thread(target=self.register, daemon=True)
+        thread_servidors.start()
 
 
+    @expose
+    def add_user(self, user_name: str, distance: int,latitude=0.0, longitude=0.0):
+        if self.get_user_by_name(user_name) is not None:
+            return self.Returns.USER_ALREADY_EXISTS
+
+        self.user_list.append(UserInformation(user_name, distance,latitude, longitude))
+        return self.Returns.NO_ERROR
+
+
+    @expose
     def update_coordinate(self, user_name:str, latitude: float, longitude: float) -> Optional[Returns, Coordinate.Returns]:
         user = self.get_user_by_name(user_name)
         if user is None:
@@ -107,39 +128,68 @@ class Server:
         return None
 
 
-    def get_list_by_coordinate(self, user_info: UserInformation) -> List[UserInformation]:
-        user_list_by_distance: List[UserInformation] = []
+    @expose
+    def get_list_by_coordinate(self, user_name: str) -> List[str]:
+        user_list_by_distance: List[str] = []
+
+        user_info: UserInformation = self.get_user_by_name(user_name)
+
+        if user_info is None:
+            return []
 
         for user in self.user_list:
-            if user != user_info and user.coordinate.get_distance(user_info.coordinate) < user_info.distance:
-                user_list_by_distance.append(user)
+            distance = user_info.coordinate.get_distance(user.coordinate)
+            if user != user_info and  user.distance > distance < user_info.distance :
+                user_list_by_distance.append(user.name)
 
         return user_list_by_distance
 
+    def connect(self) -> ClientInterface:
+        while True:
+            try:
+                ns = locate_ns(port=9090)
+                uri_remoto = ns.lookup("lucas")
+                client: ClientInterface = Proxy(uri_remoto)
+                break
+            except Exception as e:
+                print(f"name server connect:  {e}")
+                time.sleep(1)
 
+        return client
+
+    @expose
     def send_message(self):
-        pass
+        client = self.connect()
+        client.receive_message("|@servidor@|")
+
+
+    def register(self):
+        daemon = Daemon()
+
+        while True:
+            try:
+                ns = locate_ns(port=9090)
+
+                uri = daemon.register(self)
+                ns.register(self.server_id, uri)
+                break
+            except Exception as e:
+                print(e)
+
+            time.sleep(1)
+
+        print(f"Servidor registrado como {self.server_id}")
+        daemon.requestLoop()
 
 
 if __name__ == '__main__':
-    coord_1 = Coordinate(19.0760, 72.8777)
-    coord_2 = Coordinate(18.5204, 73.8567)
-
-    user1 = UserInformation(user_name="lucas", distance=130000,latitude=19.0760, longitude=72.8777)
-    user2 = UserInformation(user_name="pedro", distance=10,latitude=18.5204, longitude=73.8567)
-
     server = Server()
 
-    server.add_user(user1)
-    server.add_user(user2)
-
-    some_user = server.get_user_by_name(user_name='lucas')
-    if some_user is not None:
-        print(some_user.coordinate)
-
-    some_user = server.get_list_by_coordinate(user1)
-
-    print(some_user[0])
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Encerrando servidor...")
 
 
 
